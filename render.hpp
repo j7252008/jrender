@@ -194,6 +194,23 @@ private:
     std::vector<int>  facet_nrm;
 };
 
+class Shader
+{
+public:
+    virtual void vs(vec4& p) = 0;
+    virtual bool fs(const vec3& bar, Color &color) = 0;
+};
+
+vec3 barycentric(const vec2 tri[3], const vec2 P)
+{
+    mat<3, 3> ABC = { { embed<3>(tri[0]), embed<3>(tri[1]), embed<3>(tri[2]) } };
+
+    // for a degenerate triangle generate negative coordinates, it will be thrown away by the rasterizator
+    if (ABC.det() < 1e-3) return { -1, 1, 1 };
+
+    return ABC.invert_transpose() * embed<3>(P);
+}
+
 inline void DrawPoint(Image& image, const vec2& p, const Color& c)
 {
     image.setPixel((int)std::round(((p.x + 1) / 2) * (image.width() - 1)),
