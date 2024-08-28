@@ -1,16 +1,11 @@
 #include <iostream>
 #include <vector>
 #include <cstdint>
+#include <memory>
 
 #include "geometry.h"
 
 namespace jrender {
-
-struct Point2D
-{
-    int x;
-    int y;
-};
 
 struct Color
 {
@@ -23,11 +18,12 @@ struct Color
     };
 };
 
+enum class PrimitiveMode { Point, Line, Triangle };
 enum class Format { BGRA, RGBA };
 
-std::vector<Point2D> linePoints(Point2D&& p0, Point2D&& p1)
+std::vector<vec2> linePoints(vec2&& p0, vec2&& p1)
 {
-    std::vector<Point2D> pts;
+    std::vector<vec2> pts;
 
     bool steep = false;
     if (std::abs(p0.x - p1.x) < std::abs(p0.y - p1.y)) {
@@ -46,10 +42,10 @@ std::vector<Point2D> linePoints(Point2D&& p0, Point2D&& p1)
     int y = p0.y;
     for (int x = p0.x; x <= p1.x; x++) {
         if (steep) {
-            pts.emplace_back(Point2D{ y, x });
+            pts.emplace_back(vec2{ (double)y, (double)x });
         }
         else {
-            pts.emplace_back(Point2D{ x, y });
+            pts.emplace_back(vec2{ (double)x, (double)y });
         }
         error2 += derror2;
         if (error2 > dx) {
@@ -183,7 +179,7 @@ public:
     int faces() const { return _indices.size() / 3; }
 
     vec3 vertex(int i) const { return _vertices[i]; }
-    vec3 vertex(int face, int i) const { return _vertices[_indices[face * 3 + i]]; }
+    vec3 indexVertex(int index) const { return _vertices[_indices[index]]; }
 
 private:
     std::vector<vec3> _vertices;   // array of vertices
@@ -193,47 +189,186 @@ private:
     std::vector<int>  facet_tex;
     std::vector<int>  facet_nrm;
 };
+using ModelPtr = std::shared_ptr<Model>;
 
 class Shader
 {
 public:
+    virtual ~Shader() {}
     virtual void vs(vec4& p) = 0;
-    virtual bool fs(const vec3& bar, Color &color) = 0;
+    virtual bool fs(const vec3& bar, vec4& color) = 0;
 };
+using ShaderPtr = std::shared_ptr<Shader>;
 
-vec3 barycentric(const vec2 tri[3], const vec2 P)
+vec3 barycentricLine(const vec2 tri[2], const vec2 p)
+{
+    auto distance = [](const vec2& p1, const vec2& p2) {
+        return std::sqrt((p1.x - p2.x) * (p1.x - p2.x) + (p1.y - p2.y) * (p1.y - p2.y));
+    };
+
+    double a = distance(p, tri[0]) / distance(tri[0], tri[1]);
+    return vec3{ 1 - a, a, 0 };
+}
+
+vec3 barycentric(const vec2 tri[3], const vec2& P)
 {
     mat<3, 3> ABC = { { embed<3>(tri[0]), embed<3>(tri[1]), embed<3>(tri[2]) } };
 
     // for a degenerate triangle generate negative coordinates, it will be thrown away by the rasterizator
-    if (ABC.det() < 1e-3) return { -1, 1, 1 };
+    // if (ABC.det() < 1e-3) return { -1, 1, 1 };
 
     return ABC.invert_transpose() * embed<3>(P);
 }
 
-inline void DrawPoint(Image& image, const vec2& p, const Color& c)
+class Render
 {
-    image.setPixel((int)std::round(((p.x + 1) / 2) * (image.width() - 1)),
-                   (int)std::round(((p.y + 1) / 2) * (image.height() - 1)), c);
-}
+public:
+    Render(ModelPtr model, ShaderPtr shader) : _model(std::move(model)), _shader(std::move(shader)) {}
+    ~Render() {}
 
-void DrawLine(Image& image, const vec2& p0, const vec2& p1, const Color& c)
-{
-    auto vec2ToPoint = [&image](const vec2& p) {
-        return Point2D{ (int)std::round(((p.x + 1) / 2) * (image.width() - 1)),
-                        (int)std::round(((p.y + 1) / 2) * (image.height() - 1)) };
-    };
-
-    for (const auto& p : linePoints(vec2ToPoint(p0), vec2ToPoint(p1))) {
-        image.setPixel(p.x, p.y, c);
+    void setViewport(int x, int y, int w, int h)
+    {
+        _viewport = { { { (w - 1) / 2.0, 0, 0, x + (w - 1) / 2.0 },
+                        { 0, (h - 1) / 2.0, 0, y + (h - 1) / 2.0 },
+                        { 0, 0, 1, 0 },
+                        { 0, 0, 0, 1 } } };
     }
-}
 
-void DrawTriangle(Image& image, const vec3& p0, const vec3& p1, const vec3& p2, const Color& c)
-{
-    DrawLine(image, vec2{ p0.x, p0.y }, vec2{ p1.x, p1.y }, c);
-    DrawLine(image, vec2{ p1.x, p1.y }, vec2{ p2.x, p2.y }, c);
-    DrawLine(image, vec2{ p2.x, p2.y }, vec2{ p0.x, p0.y }, c);
-}
+    void setModel(ModelPtr model) { _model = std::move(model); }
+
+    void drawArray(Image& frame, PrimitiveMode mode, int start, int vertexCount)
+    {
+        if (mode == PrimitiveMode::Triangle) {
+            int priCount = vertexCount / 3;
+            for (int i = 0; i < priCount; i++) {
+                vec3 tri[3] = { _model->vertex(start + i * 3), _model->vertex(start + i * 3 + 1),
+                                _model->vertex(start + i * 3 + 2) };
+
+                drawTriangle(frame, tri);
+            }
+        }
+        else if (mode == PrimitiveMode::Line) {
+            int priCount = vertexCount / 2;
+            for (int i = 0; i < priCount; i++) {
+                vec3 line[2] = { _model->vertex(start + i * 2), _model->vertex(start + i * 2 + 1) };
+                drawLine(frame, line);
+            }
+        }
+        else if (mode == PrimitiveMode::Point) {
+            for (int i = start; i < vertexCount; i++) {
+                drawPoint(frame, _model->vertex(i));
+            }
+        }
+    }
+
+    void drawIndex(Image& frame, PrimitiveMode mode, int start, int indexCount)
+    {
+        if (mode == PrimitiveMode::Triangle) {
+            int priCount = indexCount / 3;
+            for (int i = 0; i < priCount; i++) {
+                vec3 tri[3] = { _model->indexVertex(start + i * 3), _model->indexVertex(start + i * 3 + 1),
+                                _model->indexVertex(start + i * 3 + 2) };
+
+                drawTriangle(frame, tri);
+            }
+        }
+        else if (mode == PrimitiveMode::Line) {
+            int priCount = indexCount / 2;
+            for (int i = 0; i < priCount; i++) {
+                vec3 line[2] = { _model->indexVertex(start + i * 2), _model->indexVertex(start + i * 2 + 1) };
+                drawLine(frame, line);
+            }
+        }
+        else if (mode == PrimitiveMode::Point) {
+            for (int i = start; i < indexCount; i++) {
+                drawPoint(frame, _model->indexVertex(i));
+            }
+        }
+    }
+
+private:
+    void drawPoint(Image& frame, vec3 p)
+    {
+        vec4 v = embed<4>(p);
+        _shader->vs(v);
+        vec4 pV = _viewport * v;
+        vec2 pt{ pV[0] / pV[3], pV[1] / pV[3] };
+
+        vec4 fsColor;
+        if (_shader->fs(vec3{ 1.0, 0.0, 0.0 }, fsColor)) {
+            fsColor = fsColor * 255;
+            jrender::Color color{ (uint8_t)fsColor[0], (uint8_t)fsColor[1], (uint8_t)fsColor[2], (uint8_t)fsColor[3] };
+            frame.setPixel((int)pt.x, (int)pt.y, color);
+        }
+    }
+
+    void drawLine(Image& frame, vec3 line[2])
+    {
+        vec4 v0 = embed<4>(line[0]);
+        vec4 v1 = embed<4>(line[1]);
+        _shader->vs(v0);
+        _shader->vs(v1);
+        vec4 pV0 = _viewport * v0;
+        vec4 pV1 = _viewport * v1;
+
+        vec2 pts[2] = {
+            { pV0[0] / pV0[3], pV0[1] / pV0[3] },
+            { pV1[0] / pV1[3], pV1[1] / pV1[3] },
+        };
+
+#pragma omp parallel for
+        for (const auto& p : linePoints(vec2{ pts[0].x, pts[0].y }, vec2{ pts[1].x, pts[1].y })) {
+            vec4 fsColor;
+            if (_shader->fs(barycentricLine(pts, p), fsColor)) {
+                fsColor = fsColor * 255;
+                jrender::Color color{ (uint8_t)fsColor[0], (uint8_t)fsColor[1], (uint8_t)fsColor[2],
+                                      (uint8_t)fsColor[3] };
+                frame.setPixel(p.x, p.y, color);
+            }
+        }
+    }
+
+    void drawTriangle(Image& frame, vec3 tri[3])
+    {
+        vec4 v0 = embed<4>(tri[0]);
+        vec4 v1 = embed<4>(tri[1]);
+        vec4 v2 = embed<4>(tri[2]);
+
+        _shader->vs(v0);
+        _shader->vs(v1);
+        _shader->vs(v2);
+
+        vec4 pV0 = _viewport * v0;
+        vec4 pV1 = _viewport * v1;
+        vec4 pV2 = _viewport * v2;
+
+        vec2 pts[3] = { proj<2>(pV0 / pV0[3]), proj<2>(pV1 / pV1[3]), proj<2>(pV2 / pV2[3]) };
+
+        int minX = std::min({ pts[0].x, pts[1].x, pts[2].x });
+        int maxX = std::max({ pts[0].x, pts[1].x, pts[2].x });
+        int minY = std::min({ pts[0].y, pts[1].y, pts[2].y });
+        int maxY = std::max({ pts[0].y, pts[1].y, pts[2].y });
+
+#pragma omp parallel for
+        for (int y = minY; y < maxY; y++) {
+            for (int x = minX; x < maxX; x++) {
+                vec3 bc_screen = barycentric(pts, vec2{ (double)x, (double)y });
+                if (bc_screen.x < 0 || bc_screen.y < 0 || bc_screen.z < 0) continue;
+
+                vec4 fsColor;
+                if (_shader->fs(bc_screen, fsColor)) {
+                    fsColor = fsColor * 255;
+                    Color color{ (uint8_t)fsColor[0], (uint8_t)fsColor[1], (uint8_t)fsColor[2], (uint8_t)fsColor[3] };
+                    frame.setPixel(x, y, color);
+                }
+            }
+        }
+    }
+
+private:
+    ModelPtr  _model;
+    ShaderPtr _shader;
+    mat<4, 4> _viewport;
+};
 
 }  // namespace jrender
