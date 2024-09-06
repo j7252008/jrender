@@ -1,11 +1,18 @@
 #include <iostream>
+#include <fstream>
+#include <sstream>
 #include <vector>
 #include <cstdint>
 #include <memory>
+#include <algorithm>
 
-#include "geometry.h"
+#include <glm/glm.hpp>
 
 namespace jrender {
+
+using glm::vec2;
+using glm::vec3;
+using glm::vec4;
 
 struct Color
 {
@@ -143,7 +150,7 @@ public:
                 vec3 n;
                 for (int i = 0; i < 3; i++)
                     iss >> n[i];
-                norms.push_back(n.normalized());
+                norms.push_back(glm::normalize(n));
             }
             else if (!line.compare(0, 3, "vt ")) {
                 iss >> trash >> trash;
@@ -202,22 +209,18 @@ using ShaderPtr = std::shared_ptr<Shader>;
 
 vec3 barycentricLine(const vec2 tri[2], const vec2 p)
 {
-    auto distance = [](const vec2& p1, const vec2& p2) {
-        return std::sqrt((p1.x - p2.x) * (p1.x - p2.x) + (p1.y - p2.y) * (p1.y - p2.y));
-    };
-
-    double a = distance(p, tri[0]) / distance(tri[0], tri[1]);
+    double a = glm::distance(p, tri[0]) / glm::distance(tri[0], tri[1]);
     return vec3{ 1 - a, a, 0 };
 }
 
 vec3 barycentric(const vec2 tri[3], const vec2& P)
 {
-    mat<3, 3> ABC = { { embed<3>(tri[0]), embed<3>(tri[1]), embed<3>(tri[2]) } };
+    glm::mat3 ABC = { vec3(tri[0], 1.0), vec3(tri[1], 1.0), vec3(tri[2], 1.0) };
 
     // for a degenerate triangle generate negative coordinates, it will be thrown away by the rasterizator
     // if (ABC.det() < 1e-3) return { -1, 1, 1 };
 
-    return ABC.invert_transpose() * embed<3>(P);
+    return glm::inverse(ABC) * vec3(P, 1.0);
 }
 
 class Render
@@ -228,10 +231,17 @@ public:
 
     void setViewport(int x, int y, int w, int h)
     {
-        _viewport = { { { (w - 1) / 2.0, 0, 0, x + (w - 1) / 2.0 },
-                        { 0, (h - 1) / 2.0, 0, y + (h - 1) / 2.0 },
-                        { 0, 0, 1, 0 },
-                        { 0, 0, 0, 1 } } };
+        _viewport = glm::mat4(1.0f);
+
+        // 缩放 NDC 到窗口坐标的比例
+        _viewport[0][0] = (w - 1) / 2.0f;
+        _viewport[1][1] = (h - 1) / 2.0f;
+        _viewport[2][2] = 1;
+
+        // 平移到窗口坐标的偏移量
+        _viewport[3][0] = x + (w - 1) / 2.0f;
+        _viewport[3][1] = y + (h - 1) / 2.0f;
+        _viewport[3][2] = 0;
     }
 
     void setModel(ModelPtr model) { _model = std::move(model); }
@@ -289,14 +299,14 @@ public:
 private:
     void drawPoint(Image& frame, vec3 p)
     {
-        vec4 v = embed<4>(p);
+        vec4 v = vec4(p, 1.0);
         _shader->vs(v);
         vec4 pV = _viewport * v;
         vec2 pt{ pV[0] / pV[3], pV[1] / pV[3] };
 
         vec4 fsColor;
         if (_shader->fs(vec3{ 1.0, 0.0, 0.0 }, fsColor)) {
-            fsColor = fsColor * 255;
+            fsColor = fsColor * 255.0f;
             jrender::Color color{ (uint8_t)fsColor[0], (uint8_t)fsColor[1], (uint8_t)fsColor[2], (uint8_t)fsColor[3] };
             frame.setPixel((int)pt.x, (int)pt.y, color);
         }
@@ -304,8 +314,8 @@ private:
 
     void drawLine(Image& frame, vec3 line[2])
     {
-        vec4 v0 = embed<4>(line[0]);
-        vec4 v1 = embed<4>(line[1]);
+        vec4 v0 = vec4(line[0], 1.0);
+        vec4 v1 = vec4(line[1], 1.0);
         _shader->vs(v0);
         _shader->vs(v1);
         vec4 pV0 = _viewport * v0;
@@ -320,7 +330,7 @@ private:
         for (const auto& p : linePoints(vec2{ pts[0].x, pts[0].y }, vec2{ pts[1].x, pts[1].y })) {
             vec4 fsColor;
             if (_shader->fs(barycentricLine(pts, p), fsColor)) {
-                fsColor = fsColor * 255;
+                fsColor = fsColor * 255.0f;
                 jrender::Color color{ (uint8_t)fsColor[0], (uint8_t)fsColor[1], (uint8_t)fsColor[2],
                                       (uint8_t)fsColor[3] };
                 frame.setPixel(p.x, p.y, color);
@@ -330,9 +340,9 @@ private:
 
     void drawTriangle(Image& frame, vec3 tri[3])
     {
-        vec4 v0 = embed<4>(tri[0]);
-        vec4 v1 = embed<4>(tri[1]);
-        vec4 v2 = embed<4>(tri[2]);
+        vec4 v0 = vec4(tri[0], 1.0);
+        vec4 v1 = vec4(tri[1], 1.0);
+        vec4 v2 = vec4(tri[2], 1.0);
 
         _shader->vs(v0);
         _shader->vs(v1);
@@ -342,7 +352,7 @@ private:
         vec4 pV1 = _viewport * v1;
         vec4 pV2 = _viewport * v2;
 
-        vec2 pts[3] = { proj<2>(pV0 / pV0[3]), proj<2>(pV1 / pV1[3]), proj<2>(pV2 / pV2[3]) };
+        vec2 pts[3] = { vec2(pV0 / pV0[3]), vec2(pV1 / pV1[3]), vec2(pV2 / pV2[3]) };
 
         int minX = std::min({ pts[0].x, pts[1].x, pts[2].x });
         int maxX = std::max({ pts[0].x, pts[1].x, pts[2].x });
@@ -357,7 +367,7 @@ private:
 
                 vec4 fsColor;
                 if (_shader->fs(bc_screen, fsColor)) {
-                    fsColor = fsColor * 255;
+                    fsColor = fsColor * 255.0f;
                     Color color{ (uint8_t)fsColor[0], (uint8_t)fsColor[1], (uint8_t)fsColor[2], (uint8_t)fsColor[3] };
                     frame.setPixel(x, y, color);
                 }
@@ -368,7 +378,7 @@ private:
 private:
     ModelPtr  _model;
     ShaderPtr _shader;
-    mat<4, 4> _viewport;
+    glm::mat4 _viewport;
 };
 
 }  // namespace jrender

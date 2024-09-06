@@ -7,7 +7,6 @@
 #include <X11/Xutil.h>
 
 #include "render.hpp"
-#include "geometry.h"
 
 class MyShader : public jrender::Shader
 {
@@ -15,17 +14,17 @@ public:
     MyShader() {}
     ~MyShader() {}
 
-    virtual void vs(vec4& p) override {}
+    virtual void vs(glm::vec4& p) override {}
 
-    virtual bool fs(const vec3& bar, vec4& color) override
+    virtual bool fs(const glm::vec3& bar, glm::vec4& color) override
     {
-        vec3 vertexColor[3] = { vec3{ 1, 0, 0 }, vec3{ 0, 1, 0 }, vec3{ 0, 0, 1 } };
-        vec3 c = vertexColor[0] * bar[0] + vertexColor[1] * bar[1] + vertexColor[2] * bar[2];
-        color = embed<4>(c);
+        glm::vec3 vertexColor[3] = { glm::vec3{ 1, 0, 0 }, glm::vec3{ 0, 1, 0 }, glm::vec3{ 0, 0, 1 } };
+        glm::vec3 c = vertexColor[0] * bar[0] + vertexColor[1] * bar[1] + vertexColor[2] * bar[2];
+        color = glm::vec4(c, 1.0);
         return true;
     }
 
-    vec4 vertex[3];
+    glm::vec4 vertex[3];
 };
 
 int main()
@@ -57,7 +56,8 @@ int main()
                                   frame.data(), screenWidth, screenHeight, 32, 0);
 
     ModelPtr vertices = std::make_shared<Model>();
-    vertices->setVertices({ { -1, 0.5 }, { -0.3, -1 }, { 1, 0.3 }, { 0.5, 1 } });
+    vertices->setVertices(
+      { glm::vec3(-1.0, 0.5, 0.0), glm::vec3(-0.3, -1.0, 0.0), glm::vec3(1.0, 0.3, 0.0), glm::vec3(0.5, 1.0, 0.0) });
 
     ShaderPtr shader = std::make_shared<MyShader>();
     Render    render(vertices, shader);
