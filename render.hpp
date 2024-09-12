@@ -8,6 +8,9 @@
 
 #include <glm/glm.hpp>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb/stb_image.h>
+
 namespace jrender {
 
 using glm::vec2;
@@ -26,7 +29,7 @@ struct Color
 };
 
 enum class PrimitiveMode { Point, Line, Triangle };
-enum class Format { BGRA, RGBA };
+enum class Format { GRAYSCALE = 1, RGB = 3, RGBA = 4, BGRA = 5 };
 
 std::vector<vec2> linePoints(vec2&& p0, vec2&& p1)
 {
@@ -67,6 +70,10 @@ std::vector<vec2> linePoints(vec2&& p0, vec2&& p1)
 constexpr int FormatSize(Format format)
 {
     switch (format) {
+    case Format::GRAYSCALE:
+        return 1;
+    case Format::RGB:
+        return 3;
     case Format::BGRA:
     case Format::RGBA:
         return 4;
@@ -78,12 +85,31 @@ constexpr int FormatSize(Format format)
 class Image
 {
 public:
+    Image(const char* imgPath) { loadImage(imgPath); }
+
     Image(int w, int h, Format format) : _width(w), _height(h), _format(format)
     {
         _pixels.reserve(w * h * FormatSize(_format));
     }
 
     ~Image() {}
+
+    void loadImage(const char* filePath)
+    {
+        int       channels;
+        u_int8_t* data = stbi_load(filePath, &_width, &_height, &channels, 0);
+        _format = (Format)channels;
+
+        int len = _width * _height * FormatSize(_format);
+        _pixels.assign(data, data + len);
+        if (_format == Format::RGB || _format == Format::RGBA) {
+            for (int i = 0; i < _width * _height; ++i) {
+                std::swap(_pixels[i * channels], _pixels[i * channels + 2]);
+            }
+        }
+
+        stbi_image_free(data);
+    }
 
     void setPixel(int x, int y, const Color& c)
     {
@@ -105,6 +131,19 @@ public:
         default:
             break;
         }
+    }
+
+    Color pixel(int x, int y) const
+    {
+        if (!_pixels.size() || x < 0 || y < 0 || x >= _width || y >= _height) return {};
+
+        Color ret = { 0, 0, 0, 0 };
+
+        int                 pSize = FormatSize(_format);
+        const std::uint8_t* p = _pixels.data() + (x + y * _width) * pSize;
+        for (int i = pSize; i--; ret.bgra[i] = p[i])
+            ;
+        return ret;
     }
 
     int width() const { return _width; }
