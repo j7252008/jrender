@@ -11,20 +11,36 @@
 class MyShader : public jrender::Shader
 {
 public:
-    MyShader() {}
-    ~MyShader() {}
+    MyShader(jrender::ModelPtr model) : _model(model) {}
+    ~MyShader() override {}
 
-    virtual void vs(glm::vec4& p) override {}
-
-    virtual bool fs(const glm::vec3& bar, glm::vec4& color) override
+    virtual glm::vec4 vs(uint32_t dataID, uint8_t vertexID) override
     {
-        glm::vec3 vertexColor[3] = { glm::vec3{ 1, 0, 0 }, glm::vec3{ 0, 1, 0 }, glm::vec3{ 0, 0, 1 } };
-        glm::vec3 c = vertexColor[0] * bar[0] + vertexColor[1] * bar[1] + vertexColor[2] * bar[2];
-        color = glm::vec4(c, 1.0);
+        _uv[vertexID] = _model->texcoord(dataID);
+        _norm[vertexID] = _model->normal(dataID);
+        _pos[vertexID] = _model->vertex(dataID);
+        return glm::vec4(_pos[vertexID], 1.0);
+    }
+
+    bool fs(const glm::vec3& bar, glm::vec4& color) override
+    {
+        constexpr glm::vec3 light_dir{ 1, 1, 1 };  // light source
+
+        glm::vec2 uv = _uv * bar;
+
+        color = sample2D(_model->diffuse(), uv);
+
+        // glm::vec3 vertexColor[3] = { glm::vec3{ 1, 0, 0 }, glm::vec3{ 0, 1, 0 }, glm::vec3{ 0, 0, 1 } };
+        // glm::vec3 c = vertexColor[0] * bar[0] + vertexColor[1] * bar[1] + vertexColor[2] * bar[2];
+        // color = glm::vec4(c, 1.0);
         return true;
     }
 
-    glm::vec4 vertex[3];
+    glm::mat3x2 _uv;
+    glm::mat3   _norm;
+    glm::mat3   _pos;
+
+    jrender::ModelPtr _model;
 };
 
 int main()
@@ -32,7 +48,7 @@ int main()
     constexpr int screenWidth = 800;
     constexpr int screenHeight = 600;
 
-    Display* display = XOpenDisplay(NULL);
+    Display* display = XOpenDisplay(nullptr);
     if (!display) {
         fprintf(stderr, "Unable to open X display\n");
         return 1;
@@ -47,20 +63,24 @@ int main()
     XFlush(display);
 
     // 创建图形上下文
-    GC gc = XCreateGC(display, window, 0, NULL);
+    GC gc = XCreateGC(display, window, 0, nullptr);
 
     using namespace jrender;
-    Image frame(screenWidth, screenHeight, Format::RGBA);
+    Image frame(screenWidth, screenHeight, Format::BGRA);
 
     XImage* xImage = XCreateImage(display, DefaultVisual(display, 0), DefaultDepth(display, 0), ZPixmap, 0,
                                   frame.data(), screenWidth, screenHeight, 32, 0);
 
     ModelPtr vertices = std::make_shared<Model>();
+    vertices->diffuse().loadImage("awesomeface.png");
+    std::vector<vec2> texCoords(10, vec2(0.5, 0.5));
+    vertices->setTexCoords(std::move(texCoords));
     vertices->setVertices(
       { glm::vec3(-1.0, 0.5, 0.0), glm::vec3(-0.3, -1.0, 0.0), glm::vec3(1.0, 0.3, 0.0), glm::vec3(0.5, 1.0, 0.0) });
 
-    ShaderPtr shader = std::make_shared<MyShader>();
-    Render    render(vertices, shader);
+    ShaderPtr shader = std::make_shared<MyShader>(vertices);
+
+    Render render(vertices, shader);
     render.setViewport(0, 0, screenWidth, screenHeight);
 
     render.drawArray(frame, PrimitiveMode::Point, 0, 2);
@@ -70,13 +90,16 @@ int main()
     render.drawArray(frame, PrimitiveMode::Triangle, 0, 4);
 
     ModelPtr model = std::make_shared<Model>();
-    model->loadModel("diablo3_pose.obj");
+    model->loadModel("diablo3_pose/diablo3_pose.obj");
+    ShaderPtr shaderD = std::make_shared<MyShader>(model);
+
+    render.setShader(shaderD);
     render.setModel(model);
     render.drawIndex(frame, PrimitiveMode::Triangle, 0, model->faces() * 3);
 
     // 事件循环
     XEvent event;
-    while (1) {
+    while (true) {
         XNextEvent(display, &event);
         if (event.type == Expose) {
             // 将图像绘制到窗口
