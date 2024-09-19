@@ -12,12 +12,10 @@ if(OPENMP_FOUND)
 endif()
 
 #set(CMAKE_CXX_CLANG_TIDY "clang-tidy;-checks=-*,modernize-*")
-# 检查编译器是否为 GCC 或 Clang
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-# 检查编译器是否为 MSVC（Visual Studio 编译器）
 if (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     add_compile_options(/W4)
 endif()

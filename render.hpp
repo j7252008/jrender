@@ -24,10 +24,10 @@ enum class Format { GRAYSCALE = 1, RGB = 3, RGBA = 4, BGRA = 5 };
 struct Color
 {
     union {
-        uint8_t bgra[4];
+        uint8_t color[4];
         struct
         {
-            uint8_t b, g, r, a;
+            uint8_t r, g, b, a;
         };
     };
 };
@@ -98,7 +98,8 @@ public:
 
     void loadImage(const char* filePath)
     {
-        int       channels;
+        int channels;
+        stbi_set_flip_vertically_on_load(_flipVertical);
         u_int8_t* data = stbi_load(filePath, &_width, &_height, &channels, 0);
         if (data == nullptr) {
             std::printf("load %s failed!\n", filePath);
@@ -109,11 +110,6 @@ public:
 
         int len = _width * _height * FormatSize(_format);
         _pixels.assign(data, data + len);
-        if (_format == Format::RGB || _format == Format::RGBA) {
-            for (int i = 0; i < _width * _height; ++i) {
-                std::swap(_pixels[i * channels], _pixels[i * channels + 2]);
-            }
-        }
 
         stbi_image_free(data);
     }
@@ -140,15 +136,15 @@ public:
         }
     }
 
-    vec4 pixel(int x, int y) const
+    Color pixel(int x, int y) const
     {
         if (!_pixels.size() || x < 0 || y < 0 || x >= _width || y >= _height) return {};
 
-        vec4 ret = { 0, 0, 0, 1 };
+        Color ret{ 0 };
 
         int            pSize = FormatSize(_format);
         const uint8_t* p = _pixels.data() + (x + y * _width) * pSize;
-        for (int i = pSize; i--; ret[i] = p[i])
+        for (int i = pSize; i--; ret.color[i] = p[i])
             ;
         return ret;
     }
@@ -166,14 +162,19 @@ private:
 
     std::vector<uint8_t> _pixels;
 };
+using ImagePtr = std::shared_ptr<Image>;
 
 class Shader
 {
 public:
     virtual ~Shader() {}
 
-    static vec4 sample2D(const Image& img, vec2& uvf) { return img.pixel(uvf[0] * img.width(), uvf[1] * img.height()); }
-    virtual vec4 vs(uint32_t dataID, uint8_t vertexID) = 0;
+    static vec4 sample2D(const Image& img, vec2& uvf)
+    {
+        Color c = img.pixel(uvf[0] * img.width(), uvf[1] * img.height());
+        return vec4(c.color[0] / 255.f, c.color[1] / 255.f, c.color[2] / 255.f, c.color[3] / 255.f);
+    }
+    virtual vec4 vs(uint32_t primID, uint8_t vertexID, vec3&& pos) = 0;
     virtual bool fs(const vec3& bary, vec4& fragColor) = 0;
 };
 using ShaderPtr = std::shared_ptr<Shader>;
@@ -232,8 +233,6 @@ public:
                 }
             }
         }
-        std::cout << "# v# " << _vertices.size() << " f# " << _vertIndices.size() / 3 << " vt# " << _texCoords.size()
-                  << " vn# " << _norms.size() << std::endl;
 
         size_t dot = filename.find_last_of(".");
         if (dot == std::string::npos) return;
@@ -291,6 +290,12 @@ public:
         return {};
     }
 
+    vec3 normal(const vec2& uvf) const
+    {
+        Color c = _normalMap.pixel(uvf[0] * _normalMap.width(), uvf[1] * _normalMap.height());
+        return vec3((double)c.color[0], (double)c.color[1], (double)c.color[2]) * 2.f / 255.f - vec3(1, 1, 1);
+    }
+
     int normalIndex(uint i) const
     {
         if (i < _normIndices.size()) {
@@ -299,7 +304,22 @@ public:
         return -1;
     }
 
-     Image& diffuse()  { return _diffuseMap; }
+    void setTexture(uint index, ImagePtr img)
+    {
+        if (index < _textures.size()) {
+            _textures[index] = std::move(img);
+        }
+    }
+
+    const ImagePtr texture(uint index) const
+    {
+        if (index < _textures.size()) {
+            return _textures[index];
+        }
+        return nullptr;
+    }
+
+    const Image& diffuse() const { return _diffuseMap; }
     const Image& specular() const { return _specularMap; }
 
 private:
@@ -313,6 +333,8 @@ private:
     Image _diffuseMap;   // diffuse color texture
     Image _specularMap;  // specular map texture
     Image _normalMap;    // normal map texture
+
+    std::array<ImagePtr, 10> _textures;
 };
 using ModelPtr = std::shared_ptr<Model>;
 
@@ -335,7 +357,13 @@ vec3 barycentric(const vec2 tri[3], const vec2& P)
 class Render
 {
 public:
-    Render(ModelPtr model, ShaderPtr shader) : _model(std::move(model)), _shader(std::move(shader)) {}
+    Render(ImagePtr frame, ModelPtr model, ShaderPtr shader)
+      : _frame(std::move(frame))
+      , _model(std::move(model))
+      , _shader(std::move(shader))
+      , _zbuffer(_frame->width() * _frame->height(), std::numeric_limits<double>::max())
+    {}
+
     ~Render() {}
 
     void setViewport(int x, int y, int w, int h)
@@ -356,72 +384,73 @@ public:
     void setModel(ModelPtr model) { _model = std::move(model); }
     void setShader(ShaderPtr shader) { _shader = std::move(shader); }
 
-    void drawArray(Image& frame, PrimitiveMode mode, int start, int vertexCount)
+    void drawArray(PrimitiveMode mode, int start, int vertexCount)
     {
         if (mode == PrimitiveMode::Triangle) {
             int priCount = vertexCount / 3;
             for (int i = 0; i < priCount; i++) {
-                int vertID[3] = { start + i * 3, start + i * 3 + 1, start + i * 3 + 2 };
-                drawTriangle(frame, vertID);
+                int vert[3] = { start + i * 3, start + i * 3 + 1, start + i * 3 + 2 };
+                drawTriangle(i, vert);
             }
         }
         else if (mode == PrimitiveMode::Line) {
             int priCount = vertexCount / 2;
             for (int i = 0; i < priCount; i++) {
-                int vertID[2] = { start + i * 2, start + i * 2 + 1 };
-                drawLine(frame, vertID);
+                int vert[2] = { start + i * 2, start + i * 2 + 1 };
+                drawLine(i, vert);
             }
         }
         else if (mode == PrimitiveMode::Point) {
-            for (int i = start; i < vertexCount; i++) {
-                drawPoint(frame, i);
+            for (int i = 0; i < vertexCount; i++) {
+                int vert = start + i;
+                drawPoint(i, vert);
             }
         }
     }
 
-    void drawIndex(Image& frame, PrimitiveMode mode, int start, int indexCount)
+    void drawIndex(PrimitiveMode mode, int start, int indexCount)
     {
         if (mode == PrimitiveMode::Triangle) {
             int priCount = indexCount / 3;
             for (int i = 0; i < priCount; i++) {
-                int vertID[3] = { _model->vertexIndex(start + i * 3), _model->vertexIndex(start + i * 3 + 1),
-                                  _model->vertexIndex(start + i * 3 + 2) };
-
-                drawTriangle(frame, vertID);
+                int vert[3] = { _model->vertexIndex(start + i * 3), _model->vertexIndex(start + i * 3 + 1),
+                                _model->vertexIndex(start + i * 3 + 2) };
+                drawTriangle(i, vert);
             }
         }
         else if (mode == PrimitiveMode::Line) {
             int priCount = indexCount / 2;
             for (int i = 0; i < priCount; i++) {
-                int vertID[2] = { _model->vertexIndex(start + i * 2), _model->vertexIndex(start + i * 2 + 1) };
-                drawLine(frame, vertID);
+                int vert[2] = { _model->vertexIndex(start + i * 2), _model->vertexIndex(start + i * 2 + 1) };
+                drawLine(i, vert);
             }
         }
         else if (mode == PrimitiveMode::Point) {
-            for (int i = start; i < indexCount; i++) {
-                drawPoint(frame, _model->vertexIndex(i));
+            for (int i = 0; i < indexCount; i++) {
+                int vert = _model->vertexIndex(start + i);
+                drawPoint(i, vert);
             }
         }
     }
 
 private:
-    void drawPoint(Image& frame, int vertID)
+    void drawPoint(int primID, int vert)
     {
-        vec4 pV = _viewport * _shader->vs(vertID, 0);
+        vec4 pV = _viewport * _shader->vs(primID, 0, _model->vertex(vert));
         vec2 pt{ pV[0] / pV[3], pV[1] / pV[3] };
 
         vec4 fsColor;
-        if (_shader->fs(vec3{ 1.0, 0.0, 0.0 }, fsColor)) {
-            //fsColor = fsColor * 255.0f;
+        if (!_shader->fs(vec3{ 1.0, 0.0, 0.0 }, fsColor)) {
+            fsColor = fsColor * 255.0f;
             jrender::Color color{ (uint8_t)fsColor[0], (uint8_t)fsColor[1], (uint8_t)fsColor[2], (uint8_t)fsColor[3] };
-            frame.setPixel((int)pt.x, (int)pt.y, color);
+            _frame->setPixel((int)pt.x, (int)pt.y, color);
         }
     }
 
-    void drawLine(Image& frame, int vertID[2])
+    void drawLine(int primID, int vert[2])
     {
-        vec4 pV0 = _viewport * _shader->vs(vertID[0], 0);
-        vec4 pV1 = _viewport * _shader->vs(vertID[1], 1);
+        vec4 pV0 = _viewport * _shader->vs(primID, 0, _model->vertex(vert[0]));
+        vec4 pV1 = _viewport * _shader->vs(primID, 1, _model->vertex(vert[1]));
 
         vec2 pts[2] = {
             { pV0[0] / pV0[3], pV0[1] / pV0[3] },
@@ -431,20 +460,20 @@ private:
 #pragma omp parallel for
         for (const auto& p : linePoints(vec2{ pts[0].x, pts[0].y }, vec2{ pts[1].x, pts[1].y })) {
             vec4 fsColor;
-            if (_shader->fs(barycentricLine(pts, p), fsColor)) {
-                //fsColor = fsColor * 255.0f;
+            if (!_shader->fs(barycentricLine(pts, p), fsColor)) {
+                fsColor = fsColor * 255.0f;
                 jrender::Color color{ (uint8_t)fsColor[0], (uint8_t)fsColor[1], (uint8_t)fsColor[2],
                                       (uint8_t)fsColor[3] };
-                frame.setPixel(p.x, p.y, color);
+                _frame->setPixel(p.x, p.y, color);
             }
         }
     }
 
-    void drawTriangle(Image& frame, int vertID[3])
+    void drawTriangle(int primID, int vert[3])
     {
-        vec4 pV0 = _viewport * _shader->vs(vertID[0], 0);
-        vec4 pV1 = _viewport * _shader->vs(vertID[1], 1);
-        vec4 pV2 = _viewport * _shader->vs(vertID[2], 2);
+        vec4 pV0 = _viewport * _shader->vs(primID, 0, _model->vertex(vert[0]));
+        vec4 pV1 = _viewport * _shader->vs(primID, 1, _model->vertex(vert[1]));
+        vec4 pV2 = _viewport * _shader->vs(primID, 2, _model->vertex(vert[2]));
 
         vec2 pts[3] = { vec2(pV0 / pV0[3]), vec2(pV1 / pV1[3]), vec2(pV2 / pV2[3]) };
 
@@ -457,22 +486,28 @@ private:
         for (int y = minY; y < maxY; y++) {
             for (int x = minX; x < maxX; x++) {
                 vec3 bc_screen = barycentric(pts, vec2{ (double)x, (double)y });
-                if (bc_screen.x < 0 || bc_screen.y < 0 || bc_screen.z < 0) continue;
+                double depth = glm::dot(vec3(pV0.z, pV1.z, pV2.z), bc_screen);
+                if (bc_screen.x < 0 || bc_screen.y < 0 || bc_screen.z < 0 || depth > _zbuffer[y * _frame->width() + x])
+                    continue;
 
                 vec4 fsColor;
-                if (_shader->fs(bc_screen, fsColor)) {
-                    //fsColor = fsColor * 255.0f;
+                if (!_shader->fs(bc_screen, fsColor)) {
+                    _zbuffer[y * _frame->width() + x] = depth;
+                    fsColor = fsColor * 255.0f;
                     Color color{ (uint8_t)fsColor[0], (uint8_t)fsColor[1], (uint8_t)fsColor[2], (uint8_t)fsColor[3] };
-                    frame.setPixel(x, y, color);
+                    _frame->setPixel(x, y, color);
                 }
             }
         }
     }
 
 private:
+    ImagePtr  _frame;
     ModelPtr  _model;
     ShaderPtr _shader;
     glm::mat4 _viewport;
+
+    std::vector<double> _zbuffer;
 };
 
 }  // namespace jrender
