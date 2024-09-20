@@ -91,7 +91,7 @@ public:
 
     Image(int w, int h, Format format) : _format(format), _width(w), _height(h)
     {
-        _pixels.reserve(w * h * FormatSize(_format));
+        _pixels.resize(w * h * FormatSize(_format));
     }
 
     ~Image() {}
@@ -151,8 +151,11 @@ public:
 
     int width() const { return _width; }
     int height() const { return _height; }
+    int size() const { return _pixels.size(); }
 
     char* data() { return (char*)_pixels.data(); }
+
+    void clear() { std::fill(_pixels.begin(), _pixels.end(), 0); }
 
 private:
     bool   _flipVertical{ true };
@@ -433,6 +436,8 @@ public:
         }
     }
 
+    void clear() { std::fill(_zbuffer.begin(), _zbuffer.end(), std::numeric_limits<double>::max()); }
+
 private:
     void drawPoint(int primID, int vert)
     {
@@ -484,8 +489,16 @@ private:
 
 #pragma omp parallel for
         for (int y = minY; y < maxY; y++) {
+            if (y < 0 || y >= _frame->height()) {
+                continue;
+            }
+
             for (int x = minX; x < maxX; x++) {
-                vec3 bc_screen = barycentric(pts, vec2{ (double)x, (double)y });
+                if (x < 0 || x >= _frame->width()) {
+                    continue;
+                }
+
+                vec3   bc_screen = barycentric(pts, vec2{ (double)x, (double)y });
                 double depth = glm::dot(vec3(pV0.z, pV1.z, pV2.z), bc_screen);
                 if (bc_screen.x < 0 || bc_screen.y < 0 || bc_screen.z < 0 || depth > _zbuffer[y * _frame->width() + x])
                     continue;

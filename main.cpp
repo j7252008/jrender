@@ -2,10 +2,12 @@
 #include <algorithm>
 #include <fstream>
 #include <sstream>
+#include <chrono>
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 
+#include <glm/gtc/matrix_transform.hpp>
 #include "render.hpp"
 
 class ColorShader : public jrender::Shader
@@ -59,6 +61,8 @@ public:
     jrender::ModelPtr _model;
 };
 
+glm::mat4 mvp;
+
 class MyShader : public jrender::Shader
 {
 public:
@@ -67,22 +71,24 @@ public:
 
     virtual glm::vec4 vs(uint32_t primID, uint8_t vertexID, glm::vec3&& pos) override
     {
-        int id = _model->texcoordIndex(primID * 3 + vertexID);
-        _uv[vertexID] = _model->texcoord(id);
-        _norm[vertexID] = _model->normal(_model->normalIndex(primID * 3 + vertexID));
-        _pos[vertexID] = std::move(pos);
-        return glm::vec4(_pos[vertexID], 1.0);
+
+        glm::vec4 gPos = mvp * glm::vec4(pos, 1.f);
+
+        _uv[vertexID] = _model->texcoord(_model->texcoordIndex(primID * 3 + vertexID));
+        _norm[vertexID] = mvp * glm::vec4(_model->normal(_model->normalIndex(primID * 3 + vertexID)), 1.0);
+        _pos[vertexID] = glm::vec3(gPos);
+        return gPos;
     }
 
     bool fs(const glm::vec3& bar, glm::vec4& fragColor) override
     {
         using namespace glm;
         constexpr glm::vec3 lightColor{ 1, 1, 1 };  // light source
-        constexpr glm::vec3 lightPos{ 1.2, 1, 2 };  // light source
+        constexpr glm::vec3 lightPos{ 0, 1, 5 };    // light source
 
         vec3 fragPos = _pos * bar;
         vec2 uv = _uv * bar;
-        vec3 normal = _model->normal(uv);
+        vec3 normal = _norm * bar;  //_model->normal(uv);
 
         // ambient
         float ambient = 0.1;
@@ -109,7 +115,7 @@ public:
 int main()
 {
     constexpr int screenWidth = 800;
-    constexpr int screenHeight = 800;
+    constexpr int screenHeight = 600;
 
     Display* display = XOpenDisplay(nullptr);
     if (!display) {
@@ -170,18 +176,31 @@ int main()
 
     render.setShader(shaderD);
     render.setModel(model);
-    render.drawIndex(PrimitiveMode::Triangle, 0, model->faces() * 3);
 
     // 事件循环
+    auto   startT = std::chrono::high_resolution_clock::now();
     XEvent event;
     while (true) {
         XNextEvent(display, &event);
-        if (event.type == Expose) {
-            // 将图像绘制到窗口
-            XPutImage(display, window, gc, xImage, 0, 0, 0, 0, screenWidth, screenHeight);
-        }
         if (event.type == KeyPress) {
-            break;  // 按任意键退出
+            frame->clear();
+            render.clear();
+
+            glm::mat4 modelMat(1.f);
+            glm::mat4 view(1.f);
+            glm::mat4 proj(1.f);
+
+            std::chrono::duration<double> elapsed = std::chrono::high_resolution_clock::now() - startT;
+            modelMat = glm::rotate(modelMat, (float)elapsed.count(), glm::vec3(0, 1, 0));
+            view = glm::translate(view, glm::vec3(0, 0, -2));
+            proj = glm::perspective(glm::radians(45.f), (float)800.f / 600.f, 0.1f, 100.f);
+
+            mvp = proj * view * modelMat;
+
+            // 将图像绘制到窗口
+            render.drawIndex(PrimitiveMode::Triangle, 0, model->faces() * 3);
+            std::copy(frame->data(), frame->data() + frame->size(), xImage->data);
+            XPutImage(display, window, gc, xImage, 0, 0, 0, 0, screenWidth, screenHeight);
         }
     }
 
