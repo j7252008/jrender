@@ -374,13 +374,13 @@ public:
         _viewport = glm::mat4(1.0f);
 
         // 缩放 NDC 到窗口坐标的比例
-        _viewport[0][0] = (w - 1) / 2.0f;
-        _viewport[1][1] = (h - 1) / 2.0f;
+        _viewport[0][0] = w / 2.0f;
+        _viewport[1][1] = h / 2.0f;
         _viewport[2][2] = 1;
 
         // 平移到窗口坐标的偏移量
-        _viewport[3][0] = x + (w - 1) / 2.0f;
-        _viewport[3][1] = y + (h - 1) / 2.0f;
+        _viewport[3][0] = x + w / 2.0f;
+        _viewport[3][1] = y + h / 2.0f;
         _viewport[3][2] = 0;
     }
 
@@ -487,21 +487,15 @@ private:
         int minY = std::min({ pts[0].y, pts[1].y, pts[2].y });
         int maxY = std::max({ pts[0].y, pts[1].y, pts[2].y });
 
-#pragma omp parallel for
-        for (int y = minY; y < maxY; y++) {
-            if (y < 0 || y >= _frame->height()) {
-                continue;
-            }
-
-            for (int x = minX; x < maxX; x++) {
-                if (x < 0 || x >= _frame->width()) {
+ #pragma omp parallel for
+        for (int y = std::max(minY, 0); y <= std::min(maxY, _frame->height() - 1); y++) {
+            for (int x = std::max(minX, 0); x <= std::min(maxX, _frame->width() - 1); x++) {
+                vec3 bc_screen = barycentric(pts, vec2{ (double)x, (double)y });
+                double depth = glm::dot(vec3(pV0.z, pV1.z, pV2.z), bc_screen);
+                if (bc_screen.x < 0 || bc_screen.y < 0 || bc_screen.z < 0
+                    || depth > _zbuffer[y * _frame->width() + x]) {
                     continue;
                 }
-
-                vec3   bc_screen = barycentric(pts, vec2{ (double)x, (double)y });
-                double depth = glm::dot(vec3(pV0.z, pV1.z, pV2.z), bc_screen);
-                if (bc_screen.x < 0 || bc_screen.y < 0 || bc_screen.z < 0 || depth > _zbuffer[y * _frame->width() + x])
-                    continue;
 
                 vec4 fsColor;
                 if (!_shader->fs(bc_screen, fsColor)) {

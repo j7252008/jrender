@@ -71,9 +71,7 @@ public:
 
     virtual glm::vec4 vs(uint32_t primID, uint8_t vertexID, glm::vec3&& pos) override
     {
-
         glm::vec4 gPos = mvp * glm::vec4(pos, 1.f);
-
         _uv[vertexID] = _model->texcoord(_model->texcoordIndex(primID * 3 + vertexID));
         _norm[vertexID] = mvp * glm::vec4(_model->normal(_model->normalIndex(primID * 3 + vertexID)), 1.0);
         _pos[vertexID] = glm::vec3(gPos);
@@ -179,29 +177,25 @@ int main()
 
     // 事件循环
     auto   startT = std::chrono::high_resolution_clock::now();
-    XEvent event;
     while (true) {
-        XNextEvent(display, &event);
-        if (event.type == KeyPress) {
-            frame->clear();
-            render.clear();
+        frame->clear();
+        render.clear();
 
-            glm::mat4 modelMat(1.f);
-            glm::mat4 view(1.f);
-            glm::mat4 proj(1.f);
+        glm::mat4 modelMat(1.f);
+        glm::mat4 view(1.f);
+        glm::mat4 proj(1.f);
 
-            std::chrono::duration<double> elapsed = std::chrono::high_resolution_clock::now() - startT;
-            modelMat = glm::rotate(modelMat, (float)elapsed.count(), glm::vec3(0, 1, 0));
-            view = glm::translate(view, glm::vec3(0, 0, -2));
-            proj = glm::perspective(glm::radians(45.f), (float)800.f / 600.f, 0.1f, 100.f);
+        std::chrono::duration<double> elapsed = std::chrono::high_resolution_clock::now() - startT;
+        modelMat = glm::rotate(modelMat, (float)elapsed.count(), glm::vec3(0, 1, 0));
+        view = glm::translate(view, glm::vec3(0, 0, -2));
+        proj = glm::perspective(glm::radians(45.f), (float)screenWidth / screenHeight, 0.1f, 100.f);
 
-            mvp = proj * view * modelMat;
+        mvp = proj * view * modelMat;
 
-            // 将图像绘制到窗口
-            render.drawIndex(PrimitiveMode::Triangle, 0, model->faces() * 3);
-            std::copy(frame->data(), frame->data() + frame->size(), xImage->data);
-            XPutImage(display, window, gc, xImage, 0, 0, 0, 0, screenWidth, screenHeight);
-        }
+        // 将图像绘制到窗口
+        render.drawIndex(PrimitiveMode::Triangle, 0, model->faces() * 3);
+        std::copy(frame->data(), frame->data() + frame->size(), xImage->data);
+        XPutImage(display, window, gc, xImage, 0, 0, 0, 0, screenWidth, screenHeight);
     }
 
     // 清理
