@@ -16,7 +16,7 @@ public:
     ColorShader(jrender::ModelPtr model) : _model(model) {}
     ~ColorShader() override {}
 
-    virtual glm::vec4 vs(uint32_t primID, uint8_t vertexID, glm::vec3&& pos) override { return glm::vec4(pos, 1.0); }
+    virtual glm::vec4 vs(glm::vec3&& pos) override { return glm::vec4(pos, 1.0); }
 
     bool fs(const glm::vec3& bar, glm::vec4& fragColor) override
     {
@@ -37,12 +37,12 @@ public:
     TextureShader(jrender::ModelPtr model) : _model(model) {}
     ~TextureShader() override {}
 
-    virtual glm::vec4 vs(uint32_t primID, uint8_t vertexID, glm::vec3&& pos) override
+    virtual glm::vec4 vs(glm::vec3&& pos) override
     {
-        _pos[vertexID] = std::move(pos);
-        _uv[vertexID] = _model->texcoord(_model->texcoordIndex(primID * 3 + vertexID));
+        _pos[_vertexID] = std::move(pos);
+        _uv[_vertexID] = _model->texcoord(_model->texcoordIndex(_primID * PrimVertexCount(_primType) + _vertexID));
 
-        return glm::vec4(_pos[vertexID], 1.0);
+        return glm::vec4(_pos[_vertexID], 1.0);
     }
 
     bool fs(const glm::vec3& bar, glm::vec4& fragColor) override
@@ -56,7 +56,7 @@ public:
     }
 
     glm::mat3x2 _uv;
-    glm::mat3   _pos;
+    glm::mat3 _pos;
 
     jrender::ModelPtr _model;
 };
@@ -69,12 +69,13 @@ public:
     MyShader(jrender::ModelPtr model) : _model(model) {}
     ~MyShader() override {}
 
-    virtual glm::vec4 vs(uint32_t primID, uint8_t vertexID, glm::vec3&& pos) override
+    virtual glm::vec4 vs(glm::vec3&& pos) override
     {
         glm::vec4 gPos = mvp * glm::vec4(pos, 1.f);
-        _uv[vertexID] = _model->texcoord(_model->texcoordIndex(primID * 3 + vertexID));
-        _norm[vertexID] = mvp * glm::vec4(_model->normal(_model->normalIndex(primID * 3 + vertexID)), 1.0);
-        _pos[vertexID] = glm::vec3(gPos);
+        _uv[_vertexID] = _model->texcoord(_model->texcoordIndex(_primID * 3 + _vertexID));
+        _norm[_vertexID] =
+          mvp * glm::vec4(_model->normal(_model->normalIndex(_primID * PrimVertexCount(_primType) + _vertexID)), 1.0);
+        _pos[_vertexID] = glm::vec3(gPos);
         return gPos;
     }
 
@@ -90,13 +91,13 @@ public:
 
         // ambient
         float ambient = 0.1;
-        vec3  ambientColor = ambient * lightColor;
+        vec3 ambientColor = ambient * lightColor;
 
         // diffuse
-        vec3  norm = glm::normalize(normal);
-        vec3  lightDir = glm::normalize(lightPos - fragPos);
+        vec3 norm = glm::normalize(normal);
+        vec3 lightDir = glm::normalize(lightPos - fragPos);
         float diff = std::max(glm::dot(norm, lightDir), 0.0f);
-        vec3  diffuseColor = diff * lightColor;
+        vec3 diffuseColor = diff * lightColor;
 
         fragColor = vec4((ambientColor + diffuseColor) * vec3(sample2D(_model->diffuse(), uv)), 1.0);
 
@@ -104,8 +105,8 @@ public:
     }
 
     glm::mat3x2 _uv;
-    glm::mat3   _norm;
-    glm::mat3   _pos;
+    glm::mat3 _norm;
+    glm::mat3 _pos;
 
     jrender::ModelPtr _model;
 };
@@ -148,11 +149,11 @@ int main()
     Render render(frame, vertices, shader);
     render.setViewport(screenWidth / 8, screenHeight / 8, screenWidth * 3 / 4, screenHeight * 3 / 4);
 
-    render.drawArray(PrimitiveMode::Point, 0, 2);
-    render.drawArray(PrimitiveMode::Point, 2, 2);
-    render.drawArray(PrimitiveMode::Line, 0, 2);
-    render.drawArray(PrimitiveMode::Line, 2, 2);
-    render.drawArray(PrimitiveMode::Triangle, 0, 4);
+    render.drawArray(PrimitiveType::Point, 0, 2);
+    render.drawArray(PrimitiveType::Point, 2, 2);
+    render.drawArray(PrimitiveType::Line, 0, 2);
+    render.drawArray(PrimitiveType::Line, 2, 2);
+    render.drawArray(PrimitiveType::Triangle, 0, 4);
 
     // texture
     ModelPtr texModel = std::make_shared<Model>();
@@ -165,7 +166,7 @@ int main()
     render.setShader(texShader);
     render.setModel(texModel);
 
-    render.drawArray(PrimitiveMode::Triangle, 0, 4);
+    render.drawArray(PrimitiveType::Triangle, 0, 4);
 
     // model
     ModelPtr model = std::make_shared<Model>();
@@ -176,16 +177,21 @@ int main()
     render.setModel(model);
 
     // 事件循环
-    auto   startT = std::chrono::high_resolution_clock::now();
+    auto startT = std::chrono::high_resolution_clock::now();
+    auto lastT = startT;
     while (true) {
-        frame->clear();
         render.clear();
 
         glm::mat4 modelMat(1.f);
         glm::mat4 view(1.f);
         glm::mat4 proj(1.f);
 
-        std::chrono::duration<double> elapsed = std::chrono::high_resolution_clock::now() - startT;
+        auto now = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> elapsed = now - lastT;
+        std::cout << std::format("frame:{}\n", std::floor(1.0 / elapsed.count()));
+        lastT = now;
+
+        elapsed = now - startT;
         modelMat = glm::rotate(modelMat, (float)elapsed.count(), glm::vec3(0, 1, 0));
         view = glm::translate(view, glm::vec3(0, 0, -2));
         proj = glm::perspective(glm::radians(45.f), (float)screenWidth / screenHeight, 0.1f, 100.f);
@@ -193,7 +199,7 @@ int main()
         mvp = proj * view * modelMat;
 
         // 将图像绘制到窗口
-        render.drawIndex(PrimitiveMode::Triangle, 0, model->faces() * 3);
+        render.drawIndex(PrimitiveType::Triangle, 0, model->faces() * 3);
         std::copy(frame->data(), frame->data() + frame->size(), xImage->data);
         XPutImage(display, window, gc, xImage, 0, 0, 0, 0, screenWidth, screenHeight);
     }

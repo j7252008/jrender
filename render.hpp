@@ -18,7 +18,7 @@ using glm::vec2;
 using glm::vec3;
 using glm::vec4;
 
-enum class PrimitiveMode { Point, Line, Triangle };
+enum class PrimitiveType { Point, Line, Triangle };
 enum class Format { GRAYSCALE = 1, RGB = 3, RGBA = 4, BGRA = 5 };
 
 struct Color
@@ -66,6 +66,20 @@ std::vector<vec2> linePoints(vec2&& p0, vec2&& p1)
     }
 
     return pts;
+}
+
+constexpr int PrimVertexCount(PrimitiveType prim)
+{
+    switch (prim) {
+    case PrimitiveType::Point:
+        return 1;
+    case PrimitiveType::Line:
+        return 2;
+    case PrimitiveType::Triangle:
+        return 3;
+    default:
+        return 3;
+    }
 }
 
 constexpr int FormatSize(Format format)
@@ -142,7 +156,7 @@ public:
 
         Color ret{ 0 };
 
-        int            pSize = FormatSize(_format);
+        int pSize = FormatSize(_format);
         const uint8_t* p = _pixels.data() + (x + y * _width) * pSize;
         for (int i = pSize; i--; ret.color[i] = p[i])
             ;
@@ -158,10 +172,10 @@ public:
     void clear() { std::fill(_pixels.begin(), _pixels.end(), 0); }
 
 private:
-    bool   _flipVertical{ true };
+    bool _flipVertical{ true };
     Format _format;
-    int    _width;
-    int    _height;
+    int _width;
+    int _height;
 
     std::vector<uint8_t> _pixels;
 };
@@ -177,8 +191,12 @@ public:
         Color c = img.pixel(uvf[0] * img.width(), uvf[1] * img.height());
         return vec4(c.color[0] / 255.f, c.color[1] / 255.f, c.color[2] / 255.f, c.color[3] / 255.f);
     }
-    virtual vec4 vs(uint32_t primID, uint8_t vertexID, vec3&& pos) = 0;
+    virtual vec4 vs(vec3&& pos) = 0;
     virtual bool fs(const vec3& bary, vec4& fragColor) = 0;
+
+    PrimitiveType _primType;
+    uint8_t _vertexID;
+    uint32_t _primID;
 };
 using ShaderPtr = std::shared_ptr<Shader>;
 
@@ -197,7 +215,7 @@ public:
         while (!in.eof()) {
             std::getline(in, line);
             std::istringstream iss(line.c_str());
-            char               trash;
+            char trash;
             if (!line.compare(0, 2, "v ")) {
                 iss >> trash;
                 vec3 v;
@@ -329,9 +347,9 @@ private:
     std::vector<vec3> _vertices;
     std::vector<vec2> _texCoords;
     std::vector<vec3> _norms;
-    std::vector<int>  _vertIndices;
-    std::vector<int>  _texIndices;
-    std::vector<int>  _normIndices;
+    std::vector<int> _vertIndices;
+    std::vector<int> _texIndices;
+    std::vector<int> _normIndices;
 
     Image _diffuseMap;   // diffuse color texture
     Image _specularMap;  // specular map texture
@@ -352,7 +370,7 @@ vec3 barycentric(const vec2 tri[3], const vec2& P)
     glm::mat3 ABC = { vec3(tri[0], 1.0), vec3(tri[1], 1.0), vec3(tri[2], 1.0) };
 
     // for a degenerate triangle generate negative coordinates, it will be thrown away by the rasterizator
-    // if (ABC.det() < 1e-3) return { -1, 1, 1 };
+    if (glm::determinant(ABC) < 1e-3) return { -1, 1, 1 };
 
     return glm::inverse(ABC) * vec3(P, 1.0);
 }
@@ -387,23 +405,23 @@ public:
     void setModel(ModelPtr model) { _model = std::move(model); }
     void setShader(ShaderPtr shader) { _shader = std::move(shader); }
 
-    void drawArray(PrimitiveMode mode, int start, int vertexCount)
+    void drawArray(PrimitiveType mode, int start, int vertexCount)
     {
-        if (mode == PrimitiveMode::Triangle) {
+        if (mode == PrimitiveType::Triangle) {
             int priCount = vertexCount / 3;
             for (int i = 0; i < priCount; i++) {
                 int vert[3] = { start + i * 3, start + i * 3 + 1, start + i * 3 + 2 };
                 drawTriangle(i, vert);
             }
         }
-        else if (mode == PrimitiveMode::Line) {
+        else if (mode == PrimitiveType::Line) {
             int priCount = vertexCount / 2;
             for (int i = 0; i < priCount; i++) {
                 int vert[2] = { start + i * 2, start + i * 2 + 1 };
                 drawLine(i, vert);
             }
         }
-        else if (mode == PrimitiveMode::Point) {
+        else if (mode == PrimitiveType::Point) {
             for (int i = 0; i < vertexCount; i++) {
                 int vert = start + i;
                 drawPoint(i, vert);
@@ -411,9 +429,9 @@ public:
         }
     }
 
-    void drawIndex(PrimitiveMode mode, int start, int indexCount)
+    void drawIndex(PrimitiveType mode, int start, int indexCount)
     {
-        if (mode == PrimitiveMode::Triangle) {
+        if (mode == PrimitiveType::Triangle) {
             int priCount = indexCount / 3;
             for (int i = 0; i < priCount; i++) {
                 int vert[3] = { _model->vertexIndex(start + i * 3), _model->vertexIndex(start + i * 3 + 1),
@@ -421,14 +439,14 @@ public:
                 drawTriangle(i, vert);
             }
         }
-        else if (mode == PrimitiveMode::Line) {
+        else if (mode == PrimitiveType::Line) {
             int priCount = indexCount / 2;
             for (int i = 0; i < priCount; i++) {
                 int vert[2] = { _model->vertexIndex(start + i * 2), _model->vertexIndex(start + i * 2 + 1) };
                 drawLine(i, vert);
             }
         }
-        else if (mode == PrimitiveMode::Point) {
+        else if (mode == PrimitiveType::Point) {
             for (int i = 0; i < indexCount; i++) {
                 int vert = _model->vertexIndex(start + i);
                 drawPoint(i, vert);
@@ -436,12 +454,20 @@ public:
         }
     }
 
-    void clear() { std::fill(_zbuffer.begin(), _zbuffer.end(), std::numeric_limits<double>::max()); }
+    void clear()
+    {
+        std::fill(_zbuffer.begin(), _zbuffer.end(), std::numeric_limits<double>::max());
+        _frame->clear();
+    }
 
 private:
     void drawPoint(int primID, int vert)
     {
-        vec4 pV = _viewport * _shader->vs(primID, 0, _model->vertex(vert));
+        _shader->_primType = PrimitiveType::Point;
+        _shader->_primID = primID;
+
+        _shader->_vertexID = 0;
+        vec4 pV = _viewport * _shader->vs(_model->vertex(vert));
         vec2 pt{ pV[0] / pV[3], pV[1] / pV[3] };
 
         vec4 fsColor;
@@ -454,8 +480,13 @@ private:
 
     void drawLine(int primID, int vert[2])
     {
-        vec4 pV0 = _viewport * _shader->vs(primID, 0, _model->vertex(vert[0]));
-        vec4 pV1 = _viewport * _shader->vs(primID, 1, _model->vertex(vert[1]));
+        _shader->_primType = PrimitiveType::Line;
+        _shader->_primID = primID;
+
+        _shader->_vertexID = 0;
+        vec4 pV0 = _viewport * _shader->vs(_model->vertex(vert[0]));
+        _shader->_vertexID = 1;
+        vec4 pV1 = _viewport * _shader->vs(_model->vertex(vert[1]));
 
         vec2 pts[2] = {
             { pV0[0] / pV0[3], pV0[1] / pV0[3] },
@@ -476,9 +507,17 @@ private:
 
     void drawTriangle(int primID, int vert[3])
     {
-        vec4 pV0 = _viewport * _shader->vs(primID, 0, _model->vertex(vert[0]));
-        vec4 pV1 = _viewport * _shader->vs(primID, 1, _model->vertex(vert[1]));
-        vec4 pV2 = _viewport * _shader->vs(primID, 2, _model->vertex(vert[2]));
+        _shader->_primType = PrimitiveType::Triangle;
+        _shader->_primID = primID;
+
+        _shader->_vertexID = 0;
+        vec4 pV0 = _viewport * _shader->vs(_model->vertex(vert[0]));
+
+        _shader->_vertexID = 1;
+        vec4 pV1 = _viewport * _shader->vs(_model->vertex(vert[1]));
+
+        _shader->_vertexID = 2;
+        vec4 pV2 = _viewport * _shader->vs(_model->vertex(vert[2]));
 
         vec2 pts[3] = { vec2(pV0 / pV0[3]), vec2(pV1 / pV1[3]), vec2(pV2 / pV2[3]) };
 
@@ -487,7 +526,7 @@ private:
         int minY = std::min({ pts[0].y, pts[1].y, pts[2].y });
         int maxY = std::max({ pts[0].y, pts[1].y, pts[2].y });
 
- #pragma omp parallel for
+#pragma omp parallel for
         for (int y = std::max(minY, 0); y <= std::min(maxY, _frame->height() - 1); y++) {
             for (int x = std::max(minX, 0); x <= std::min(maxX, _frame->width() - 1); x++) {
                 vec3 bc_screen = barycentric(pts, vec2{ (double)x, (double)y });
@@ -509,8 +548,8 @@ private:
     }
 
 private:
-    ImagePtr  _frame;
-    ModelPtr  _model;
+    ImagePtr _frame;
+    ModelPtr _model;
     ShaderPtr _shader;
     glm::mat4 _viewport;
 
