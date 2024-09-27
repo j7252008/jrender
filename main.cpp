@@ -114,7 +114,7 @@ public:
 int main()
 {
     constexpr int screenWidth = 800;
-    constexpr int screenHeight = 600;
+    constexpr int screenHeight = 800;
 
     Display* display = XOpenDisplay(nullptr);
     if (!display) {
@@ -135,6 +135,7 @@ int main()
 
     using namespace jrender;
     ImagePtr frame = std::make_shared<Image>(screenWidth, screenHeight, Format::BGRA);
+    frame->setFlipVertical(true);
 
     XImage* xImage = XCreateImage(display, DefaultVisual(display, 0), DefaultDepth(display, 0), ZPixmap, 0,
                                   frame->data(), screenWidth, screenHeight, 32, 0);
@@ -180,28 +181,28 @@ int main()
     auto startT = std::chrono::high_resolution_clock::now();
     auto lastT = startT;
     while (true) {
-        render.clear();
+    render.clear();
 
-        glm::mat4 modelMat(1.f);
-        glm::mat4 view(1.f);
-        glm::mat4 proj(1.f);
+    glm::mat4 modelMat(1.f);
+    glm::mat4 view(1.f);
+    glm::mat4 proj(1.f);
 
-        auto now = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double> elapsed = now - lastT;
+    auto now = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = now - lastT;
         std::cout << std::format("frame:{}\n", std::floor(1.0 / elapsed.count()));
-        lastT = now;
+    lastT = now;
 
-        elapsed = now - startT;
+    elapsed = now - startT;
         modelMat = glm::rotate(modelMat, (float)elapsed.count(), glm::vec3(0, 1, 0));
         view = glm::translate(view, glm::vec3(0, 0, -2));
         proj = glm::perspective(glm::radians(45.f), (float)screenWidth / screenHeight, 0.1f, 100.f);
 
         mvp = proj * view * modelMat;
 
-        // 将图像绘制到窗口
-        render.drawIndex(PrimitiveType::Triangle, 0, model->faces() * 3);
-        std::copy(frame->data(), frame->data() + frame->size(), xImage->data);
-        XPutImage(display, window, gc, xImage, 0, 0, 0, 0, screenWidth, screenHeight);
+    // 将图像绘制到窗口
+    render.drawIndex(PrimitiveType::Triangle, 0, model->faces() * 3);
+    std::copy(frame->data(), frame->data() + frame->size(), xImage->data);
+    XPutImage(display, window, gc, xImage, 0, 0, 0, 0, screenWidth, screenHeight);
     }
 
     // 清理

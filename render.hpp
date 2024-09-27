@@ -101,6 +101,7 @@ class Image
 {
 public:
     Image() = default;
+
     Image(const char* imgPath) { loadImage(imgPath); }
 
     Image(int w, int h, Format format) : _format(format), _width(w), _height(h)
@@ -109,6 +110,8 @@ public:
     }
 
     ~Image() {}
+
+    void setFlipVertical(bool flip) { _flipVertical = flip; }
 
     void loadImage(const char* filePath)
     {
@@ -172,7 +175,7 @@ public:
     void clear() { std::fill(_pixels.begin(), _pixels.end(), 0); }
 
 private:
-    bool _flipVertical{ true };
+    bool _flipVertical{ false };
     Format _format;
     int _width;
     int _height;
@@ -405,6 +408,8 @@ public:
     void setModel(ModelPtr model) { _model = std::move(model); }
     void setShader(ShaderPtr shader) { _shader = std::move(shader); }
 
+    const std::vector<double>& zbuffer() const { return _zbuffer; }
+
     void drawArray(PrimitiveType mode, int start, int vertexCount)
     {
         if (mode == PrimitiveType::Triangle) {
@@ -527,8 +532,8 @@ private:
         int maxY = std::max({ pts[0].y, pts[1].y, pts[2].y });
 
 #pragma omp parallel for
-        for (int y = std::max(minY, 0); y <= std::min(maxY, _frame->height() - 1); y++) {
-            for (int x = std::max(minX, 0); x <= std::min(maxX, _frame->width() - 1); x++) {
+        for (int x = std::max(minX, 0); x <= std::min(maxX, _frame->width() - 1); x++) {
+            for (int y = std::max(minY, 0); y <= std::min(maxY, _frame->height() - 1); y++) {
                 vec3 bc_screen = barycentric(pts, vec2{ (double)x, (double)y });
                 double depth = glm::dot(vec3(pV0.z, pV1.z, pV2.z), bc_screen);
                 if (bc_screen.x < 0 || bc_screen.y < 0 || bc_screen.z < 0
