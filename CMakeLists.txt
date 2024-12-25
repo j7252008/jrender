@@ -1,9 +1,21 @@
-cmake_minimum_required (VERSION 3.8)
+cmake_minimum_required(VERSION 3.14)
 
 project(opengltest)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+# 引入 FetchContent 模块
+include(FetchContent)
+
+# 定义 fmt 库的依赖
+FetchContent_Declare(
+    fmt
+    SOURCE_DIR ${CMAKE_SOURCE_DIR}/3rdparty/fmt
+)
+
+# 拉取并集成 fmt
+FetchContent_MakeAvailable(fmt)
 
 find_package(OpenMP)
 if(OPENMP_FOUND)
@@ -20,10 +32,10 @@ if (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     add_compile_options(/W4)
 endif()
 
-
-include_directories("3rdparty")
-
-#link_directories("")
-
 add_executable(main main.cpp)
-target_link_libraries(main X11)
+target_include_directories(main PRIVATE "3rdparty")
+target_link_libraries(main PRIVATE X11 fmt)
+
+add_executable(test test.cpp)
+target_include_directories(test PRIVATE "3rdparty")
+target_link_libraries(test PRIVATE X11 fmt)
