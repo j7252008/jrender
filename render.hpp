@@ -32,42 +32,6 @@ struct Color
     };
 };
 
-std::vector<vec2> linePoints(vec2&& p0, vec2&& p1)
-{
-    std::vector<vec2> pts;
-
-    bool steep = false;
-    if (std::abs(p0.x - p1.x) < std::abs(p0.y - p1.y)) {
-        std::swap(p0.x, p0.y);
-        std::swap(p1.x, p1.y);
-        steep = true;
-    }
-    if (p0.x > p1.x) {
-        std::swap(p0.x, p1.x);
-        std::swap(p0.y, p1.y);
-    }
-    int dx = p1.x - p0.x;
-    int dy = p1.y - p0.y;
-    int derror2 = std::abs(dy) * 2;
-    int error2 = 0;
-    int y = p0.y;
-    for (int x = p0.x; x <= p1.x; x++) {
-        if (steep) {
-            pts.emplace_back(vec2{ (double)y, (double)x });
-        }
-        else {
-            pts.emplace_back(vec2{ (double)x, (double)y });
-        }
-        error2 += derror2;
-        if (error2 > dx) {
-            y += (p1.y > p0.y ? 1 : -1);
-            error2 -= dx * 2;
-        }
-    }
-
-    return pts;
-}
-
 constexpr int PrimVertexCount(PrimitiveType prim)
 {
     switch (prim) {
@@ -362,20 +326,234 @@ private:
 };
 using ModelPtr = std::shared_ptr<Model>;
 
-vec3 barycentricLine(const vec2 tri[2], const vec2 p)
+struct EdgeFunction
 {
-    double a = glm::distance(p, tri[0]) / glm::distance(tri[0], tri[1]);
-    return vec3{ 1 - a, a, 0 };
+    double stepX;
+    double stepY;
+    double constant;
+
+    // 2D 边函数可以写成 E(x, y) = A*x + B*y + C。
+    // 对三角形来说，它既能判断点在边的哪一侧，也能作为重心坐标分子的有向面积。
+    EdgeFunction(const vec2& a, const vec2& b)
+      : stepX(a.y - b.y)
+      , stepY(b.x - a.x)
+      , constant(a.x * b.y - a.y * b.x)
+    {}
+
+    double eval(double x, double y) const { return stepX * x + stepY * y + constant; }
+};
+
+// Top-left rule keeps shared triangle edges from being rasterized twice.
+bool isTopLeftEdge(const vec2& a, const vec2& b)
+{
+    const vec2 edge = b - a;
+    return edge.y > 0 || (edge.y == 0 && edge.x < 0);
 }
 
-vec3 barycentric(const vec2 tri[3], const vec2& P)
+struct EdgeCoverage
 {
-    glm::mat3 ABC = { vec3(tri[0], 1.0), vec3(tri[1], 1.0), vec3(tri[2], 1.0) };
+    EdgeFunction edge;
+    bool topLeft;
 
-    // for a degenerate triangle generate negative coordinates, it will be thrown away by the rasterizator
-    if (glm::determinant(ABC) < 1e-3) return { -1, 1, 1 };
+    // 三角形绕序可能是顺时针也可能是逆时针，top-left 规则需要跟绕序一起解释。
+    EdgeCoverage(const vec2& a, const vec2& b, bool positiveArea)
+      : edge(a, b)
+      , topLeft(positiveArea ? isTopLeftEdge(a, b) : isTopLeftEdge(b, a))
+    {}
 
-    return glm::inverse(ABC) * vec3(P, 1.0);
+    double eval(double x, double y) const { return edge.eval(x, y); }
+    double stepX() const { return edge.stepX; }
+    double stepY() const { return edge.stepY; }
+    // The signed edge value flips with winding, so the caller normalizes the sign first.
+    bool contains(double signedValue) const { return signedValue > 0 || (signedValue == 0 && topLeft); }
+};
+
+struct PerspectivePlane
+{
+    double value;
+    double stepX;
+    double stepY;
+};
+
+PerspectivePlane makePerspectivePlane(const vec3& vertexValues, const vec3& screenBaryStepX, const vec3& screenBaryStepY,
+                                      const vec3& sampleStartBary)
+{
+    // 透视除法之后，真正保持屏幕空间线性的不是属性本身，而是像 1/w、z/w 这类量。
+    // 因此我们先在起始采样点求值，再记录沿 x/y 每移动一个像素时的固定增量。
+    return {
+        glm::dot(vertexValues, sampleStartBary),
+        glm::dot(vertexValues, screenBaryStepX),
+        glm::dot(vertexValues, screenBaryStepY),
+    };
+}
+
+double edgeArea(const vec2 pts[3])
+{
+    return EdgeFunction(pts[1], pts[2]).eval(pts[0].x, pts[0].y);
+}
+
+struct ClipVertex
+{
+    // clipPos 仍然处在齐次裁剪空间；bary 记录这个顶点相对“原始三角形”的重心坐标。
+    // 裁剪生成的新顶点也会沿边插值出新的 bary，这样 fragment shader 接口不用改。
+    vec4 clipPos;
+    vec3 bary;
+};
+
+struct ClipLineVertex
+{
+    // 线段只需要一个一维参数 bary：0 表示起点，1 表示终点。
+    vec4 clipPos;
+    double bary;
+};
+
+vec3 toOriginalTriangleBary(const ClipVertex tri[3], const vec3& clippedTriangleBary)
+{
+    const glm::mat3 clippedVertexBary{ tri[0].bary, tri[1].bary, tri[2].bary };
+    return clippedVertexBary * clippedTriangleBary;
+}
+
+struct ClipPlane
+{
+    // 对 OpenGL 风格的 clip space，视锥可以写成 6 个 f(v) >= 0 的平面约束。
+    double (*distance)(const vec4&);
+};
+
+double clipLeft(const vec4& v) { return v.x + v.w; }
+double clipRight(const vec4& v) { return v.w - v.x; }
+double clipBottom(const vec4& v) { return v.y + v.w; }
+double clipTop(const vec4& v) { return v.w - v.y; }
+double clipNear(const vec4& v) { return v.z + v.w; }
+double clipFar(const vec4& v) { return v.w - v.z; }
+
+bool insideClipPlane(const ClipVertex& v, const ClipPlane& plane)
+{
+    return plane.distance(v.clipPos) >= 0.0;
+}
+
+bool insideClipPlane(const ClipLineVertex& v, const ClipPlane& plane)
+{
+    return plane.distance(v.clipPos) >= 0.0;
+}
+
+ClipVertex intersectClipPlane(const ClipVertex& a, const ClipVertex& b, const ClipPlane& plane)
+{
+    // clip space 中平面函数和边插值都是线性的，所以交点直接按参数 t 线性求解即可。
+    const double da = plane.distance(a.clipPos);
+    const double db = plane.distance(b.clipPos);
+    const double t = da / (da - db);
+    return {
+        a.clipPos + (b.clipPos - a.clipPos) * (float)t,
+        a.bary + (b.bary - a.bary) * (float)t,
+    };
+}
+
+ClipLineVertex intersectClipPlane(const ClipLineVertex& a, const ClipLineVertex& b, const ClipPlane& plane)
+{
+    const double da = plane.distance(a.clipPos);
+    const double db = plane.distance(b.clipPos);
+    const double t = da / (da - db);
+    return {
+        a.clipPos + (b.clipPos - a.clipPos) * (float)t,
+        a.bary + (b.bary - a.bary) * t,
+    };
+}
+
+std::vector<ClipVertex> clipPolygonAgainstPlane(const std::vector<ClipVertex>& polygon, const ClipPlane& plane)
+{
+    std::vector<ClipVertex> output;
+    output.reserve(4);
+
+    if (polygon.empty()) {
+        return output;
+    }
+
+    ClipVertex previous = polygon.back();
+    bool previousInside = insideClipPlane(previous, plane);
+    for (const ClipVertex& current : polygon) {
+        const bool currentInside = insideClipPlane(current, plane);
+
+        // 这里是标准的 Sutherland-Hodgman 多边形裁剪：
+        // 1. 一条边跨越平面时，补一个交点
+        // 2. 当前点在平面内时，保留当前点
+        if (currentInside != previousInside) {
+            output.push_back(intersectClipPlane(previous, current, plane));
+        }
+        if (currentInside) {
+            output.push_back(current);
+        }
+
+        previous = current;
+        previousInside = currentInside;
+    }
+
+    return output;
+}
+
+bool clipLineAgainstPlane(ClipLineVertex& a, ClipLineVertex& b, const ClipPlane& plane)
+{
+    // 线段裁剪比多边形简单：两端都在内则保留，都在外则丢弃，一内一外就把外侧端点推进到交点。
+    const bool aInside = insideClipPlane(a, plane);
+    const bool bInside = insideClipPlane(b, plane);
+    if (aInside && bInside) {
+        return true;
+    }
+    if (!aInside && !bInside) {
+        return false;
+    }
+
+    const ClipLineVertex clipped = intersectClipPlane(a, b, plane);
+    if (!aInside) {
+        a = clipped;
+    }
+    else {
+        b = clipped;
+    }
+    return true;
+}
+
+std::vector<ClipVertex> clipPolygonAgainstFrustum(const ClipVertex tri[3])
+{
+    // 依次对 left/right/bottom/top/near/far 六个平面裁剪。
+    // 每裁完一个平面，输出多边形再作为下一个平面的输入。
+    std::vector<ClipVertex> polygon{ tri, tri + 3 };
+    constexpr ClipPlane planes[] = {
+        { clipLeft },
+        { clipRight },
+        { clipBottom },
+        { clipTop },
+        { clipNear },
+        { clipFar },
+    };
+
+    for (const ClipPlane& plane : planes) {
+        polygon = clipPolygonAgainstPlane(polygon, plane);
+        if (polygon.size() < 3) {
+            break;
+        }
+    }
+
+    return polygon;
+}
+
+bool clipLineAgainstFrustum(ClipLineVertex line[2])
+{
+    // 线段路径和三角形路径保持同一套视锥定义，这样边界行为更一致。
+    constexpr ClipPlane planes[] = {
+        { clipLeft },
+        { clipRight },
+        { clipBottom },
+        { clipTop },
+        { clipNear },
+        { clipFar },
+    };
+
+    for (const ClipPlane& plane : planes) {
+        if (!clipLineAgainstPlane(line[0], line[1], plane)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 class Render
@@ -489,23 +667,64 @@ private:
         _shader->_primID = primID;
 
         _shader->_vertexID = 0;
-        vec4 pV0 = _viewport * _shader->vs(_model->vertex(vert[0]));
+        vec4 clipV0 = _shader->vs(_model->vertex(vert[0]));
         _shader->_vertexID = 1;
-        vec4 pV1 = _viewport * _shader->vs(_model->vertex(vert[1]));
+        vec4 clipV1 = _shader->vs(_model->vertex(vert[1]));
+
+        ClipLineVertex lineVertices[2] = {
+            { clipV0, 0.0 },
+            { clipV1, 1.0 },
+        };
+        if (!clipLineAgainstFrustum(lineVertices)) {
+            return;
+        }
+
+        // Clip before perspective divide so the screen-space line segment stays finite around the frustum edges.
+        const vec4 pV0 = _viewport * lineVertices[0].clipPos;
+        const vec4 pV1 = _viewport * lineVertices[1].clipPos;
 
         vec2 pts[2] = {
             { pV0[0] / pV0[3], pV0[1] / pV0[3] },
             { pV1[0] / pV1[3], pV1[1] / pV1[3] },
         };
+        const vec2 line = pts[1] - pts[0];
+        const double lengthSquared = glm::dot(line, line);
+        if (lengthSquared < 1e-6) {
+            return;
+        }
 
+        const EdgeFunction edge{ pts[0], pts[1] };
+        const double lineLength = std::sqrt(lengthSquared);
+        const int minX = std::max((int)std::floor(std::min(pts[0].x, pts[1].x) - 0.5), 0);
+        const int maxX = std::min((int)std::ceil(std::max(pts[0].x, pts[1].x) + 0.5), _frame->width() - 1);
+        const int minY = std::max((int)std::floor(std::min(pts[0].y, pts[1].y) - 0.5), 0);
+        const int maxY = std::min((int)std::ceil(std::max(pts[0].y, pts[1].y) + 0.5), _frame->height() - 1);
+
+        if (minX > maxX || minY > maxY) {
+            return;
+        }
+
+        // 这里把线段看成“围绕隐式直线的一条 1 像素宽条带”：
+        // 1. 用 edgeValue 判断像素中心到直线的带符号距离
+        // 2. 用 t 判断像素投影是否落在线段两个端点之间
+        // 3. 两个条件都满足时再执行 fragment shader
 #pragma omp parallel for
-        for (const auto& p : linePoints(vec2{ pts[0].x, pts[0].y }, vec2{ pts[1].x, pts[1].y })) {
-            vec4 fsColor;
-            if (!_shader->fs(barycentricLine(pts, p), fsColor)) {
-                fsColor = fsColor * 255.0f;
-                jrender::Color color{ (uint8_t)fsColor[0], (uint8_t)fsColor[1], (uint8_t)fsColor[2],
-                                      (uint8_t)fsColor[3] };
-                _frame->setPixel(p.x, p.y, color);
+        for (int y = minY; y <= maxY; y++) {
+            double edgeValue = edge.eval(minX + 0.5, y + 0.5);
+            for (int x = minX; x <= maxX; x++) {
+                const vec2 sample{ x + 0.5, y + 0.5 };
+                const double t = glm::dot(sample - pts[0], line) / lengthSquared;
+                if (t >= 0.0 && t <= 1.0 && std::abs(edgeValue) <= 0.5 * lineLength) {
+                    const double bary = lineVertices[0].bary + (lineVertices[1].bary - lineVertices[0].bary) * t;
+                    vec4 fsColor;
+                    if (!_shader->fs(vec3{ 1.0 - bary, bary, 0.0 }, fsColor)) {
+                        fsColor = fsColor * 255.0f;
+                        jrender::Color color{ (uint8_t)fsColor[0], (uint8_t)fsColor[1], (uint8_t)fsColor[2],
+                                              (uint8_t)fsColor[3] };
+                        _frame->setPixel(x, y, color);
+                    }
+                }
+                edgeValue += edge.stepX;
             }
         }
     }
@@ -516,38 +735,142 @@ private:
         _shader->_primID = primID;
 
         _shader->_vertexID = 0;
-        vec4 pV0 = _viewport * _shader->vs(_model->vertex(vert[0]));
+        vec4 clipV0 = _shader->vs(_model->vertex(vert[0]));
 
         _shader->_vertexID = 1;
-        vec4 pV1 = _viewport * _shader->vs(_model->vertex(vert[1]));
+        vec4 clipV1 = _shader->vs(_model->vertex(vert[1]));
 
         _shader->_vertexID = 2;
-        vec4 pV2 = _viewport * _shader->vs(_model->vertex(vert[2]));
+        vec4 clipV2 = _shader->vs(_model->vertex(vert[2]));
+
+        // 先在齐次裁剪空间里做完整视锥裁剪，再做透视除法。
+        // 如果反过来先做 x/w、y/w，跨近平面的三角形会出现极大的数值问题和错误包围盒。
+        const ClipVertex clipTriangle[3] = {
+            { clipV0, vec3{ 1.0, 0.0, 0.0 } },
+            { clipV1, vec3{ 0.0, 1.0, 0.0 } },
+            { clipV2, vec3{ 0.0, 0.0, 1.0 } },
+        };
+        const std::vector<ClipVertex> clippedPolygon = clipPolygonAgainstFrustum(clipTriangle);
+        if (clippedPolygon.size() < 3) {
+            return;
+        }
+
+        for (size_t i = 1; i + 1 < clippedPolygon.size(); i++) {
+            // 裁剪后的多边形始终保持边界顶点顺序，因此可以用扇形拆分重新生成三角形。
+            ClipVertex clippedTri[3] = {
+                clippedPolygon[0],
+                clippedPolygon[i],
+                clippedPolygon[i + 1],
+            };
+            rasterizeTriangle(clippedTri);
+        }
+    }
+
+    void rasterizeTriangle(const ClipVertex tri[3])
+    {
+        const vec4 pV0 = _viewport * tri[0].clipPos;
+        const vec4 pV1 = _viewport * tri[1].clipPos;
+        const vec4 pV2 = _viewport * tri[2].clipPos;
 
         vec2 pts[3] = { vec2(pV0 / pV0[3]), vec2(pV1 / pV1[3]), vec2(pV2 / pV2[3]) };
+        const double triangleArea = edgeArea(pts);
+        if (std::abs(triangleArea) < 1e-3) {
+            return;
+        }
+
+        // areaSign 统一了顺时针/逆时针两种顶点顺序，
+        // 后面 inside test 只需要比较“归一化后的符号”即可。
+        const bool positiveArea = triangleArea > 0;
+        const double areaSign = positiveArea ? 1.0 : -1.0;
+        const double invTriangleArea = 1.0 / triangleArea;
+        const EdgeCoverage w0Edge{ pts[1], pts[2], positiveArea };
+        const EdgeCoverage w1Edge{ pts[2], pts[0], positiveArea };
+        const EdgeCoverage w2Edge{ pts[0], pts[1], positiveArea };
+        // 透视正确插值的关键不是直接插值属性，而是插值 1/w 和 z/w。
+        // 最终像素上的 bary 需要再乘回 invWAtPixel 才能恢复成真正的透视矫正重心坐标。
+        const vec3 invClipW{ 1.0 / tri[0].clipPos.w, 1.0 / tri[1].clipPos.w, 1.0 / tri[2].clipPos.w };
+        const vec3 depthOverW{ tri[0].clipPos.z / tri[0].clipPos.w, tri[1].clipPos.z / tri[1].clipPos.w,
+                               tri[2].clipPos.z / tri[2].clipPos.w };
+        const vec3 screenBaryStepX{ w0Edge.stepX() * invTriangleArea, w1Edge.stepX() * invTriangleArea,
+                                    w2Edge.stepX() * invTriangleArea };
+        const vec3 screenBaryStepY{ w0Edge.stepY() * invTriangleArea, w1Edge.stepY() * invTriangleArea,
+                                    w2Edge.stepY() * invTriangleArea };
 
         int minX = std::min({ pts[0].x, pts[1].x, pts[2].x });
         int maxX = std::max({ pts[0].x, pts[1].x, pts[2].x });
         int minY = std::min({ pts[0].y, pts[1].y, pts[2].y });
         int maxY = std::max({ pts[0].y, pts[1].y, pts[2].y });
+        const int startX = std::max(minX, 0);
+        const int endX = std::min(maxX, _frame->width() - 1);
+        const int startY = std::max(minY, 0);
+        const int endY = std::min(maxY, _frame->height() - 1);
+
+        if (startX > endX || startY > endY) {
+            return;
+        }
+
+        // 使用像素中心采样，边界规则更稳定，也更接近常见图形 API 的定义。
+        const double sampleStartX = startX + 0.5;
+        const double sampleStartY = startY + 0.5;
+        const vec3 sampleStartBary{ w0Edge.eval(sampleStartX, sampleStartY) * invTriangleArea,
+                                    w1Edge.eval(sampleStartX, sampleStartY) * invTriangleArea,
+                                    w2Edge.eval(sampleStartX, sampleStartY) * invTriangleArea };
+        const PerspectivePlane invWPlane =
+          makePerspectivePlane(invClipW, screenBaryStepX, screenBaryStepY, sampleStartBary);
+        const PerspectivePlane depthOverWPlane =
+          makePerspectivePlane(depthOverW, screenBaryStepX, screenBaryStepY, sampleStartBary);
 
 #pragma omp parallel for
-        for (int x = std::max(minX, 0); x <= std::min(maxX, _frame->width() - 1); x++) {
-            for (int y = std::max(minY, 0); y <= std::min(maxY, _frame->height() - 1); y++) {
-                vec3 bc_screen = barycentric(pts, vec2{ (double)x, (double)y });
-                double depth = glm::dot(vec3(pV0.z, pV1.z, pV2.z), bc_screen);
-                if (bc_screen.x < 0 || bc_screen.y < 0 || bc_screen.z < 0
-                    || depth > _zbuffer[y * _frame->width() + x]) {
+        for (int y = startY; y <= endY; y++) {
+            double w0 = w0Edge.eval(sampleStartX, y + 0.5);
+            double w1 = w1Edge.eval(sampleStartX, y + 0.5);
+            double w2 = w2Edge.eval(sampleStartX, y + 0.5);
+            double invWAtPixel = invWPlane.value + (y - startY) * invWPlane.stepY;
+            double depthOverWAtPixel = depthOverWPlane.value + (y - startY) * depthOverWPlane.stepY;
+
+            for (int x = startX; x <= endX; x++) {
+                const double signedW0 = w0 * areaSign;
+                const double signedW1 = w1 * areaSign;
+                const double signedW2 = w2 * areaSign;
+                // 三条边同时满足覆盖规则，像素才处在三角形内部。
+                if (!w0Edge.contains(signedW0) || !w1Edge.contains(signedW1) || !w2Edge.contains(signedW2)) {
+                    w0 += w0Edge.stepX();
+                    w1 += w1Edge.stepX();
+                    w2 += w2Edge.stepX();
+                    invWAtPixel += invWPlane.stepX;
+                    depthOverWAtPixel += depthOverWPlane.stepX;
                     continue;
                 }
 
+                const vec3 bc_screen{ w0 * invTriangleArea, w1 * invTriangleArea, w2 * invTriangleArea };
+                const double depth = depthOverWAtPixel / invWAtPixel;
+                if (depth > _zbuffer[y * _frame->width() + x]) {
+                    w0 += w0Edge.stepX();
+                    w1 += w1Edge.stepX();
+                    w2 += w2Edge.stepX();
+                    invWAtPixel += invWPlane.stepX;
+                    depthOverWAtPixel += depthOverWPlane.stepX;
+                    continue;
+                }
+
+                // Convert screen-space barycentrics back into perspective-correct barycentrics before shading.
+                const vec3 bc_perspective = (bc_screen * invClipW) / (float)invWAtPixel;
+                // tri[i].bary 记录的是“裁剪后三角形顶点在原始三角形里的位置”，
+                // 所以这里再做一次组合，就能把像素重新映射回原始三角形的 bary。
+                const vec3 originalTriangleBary = toOriginalTriangleBary(tri, bc_perspective);
                 vec4 fsColor;
-                if (!_shader->fs(bc_screen, fsColor)) {
+                if (!_shader->fs(originalTriangleBary, fsColor)) {
                     _zbuffer[y * _frame->width() + x] = depth;
                     fsColor = fsColor * 255.0f;
                     Color color{ (uint8_t)fsColor[0], (uint8_t)fsColor[1], (uint8_t)fsColor[2], (uint8_t)fsColor[3] };
                     _frame->setPixel(x, y, color);
                 }
+
+                w0 += w0Edge.stepX();
+                w1 += w1Edge.stepX();
+                w2 += w2Edge.stepX();
+                invWAtPixel += invWPlane.stepX;
+                depthOverWAtPixel += depthOverWPlane.stepX;
             }
         }
     }

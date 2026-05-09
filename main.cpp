@@ -111,6 +111,30 @@ public:
     jrender::ModelPtr _model;
 };
 
+class ClipDebugShader : public jrender::Shader
+{
+public:
+    ClipDebugShader(jrender::ModelPtr model) : _model(model) {}
+    ~ClipDebugShader() override {}
+
+    glm::vec4 vs(glm::vec3&& pos) override { return mvp * glm::vec4(pos, 1.0f); }
+
+    bool fs(const glm::vec3& bar, glm::vec4& fragColor) override
+    {
+        using namespace glm;
+
+        constexpr mat3 vertexColor{
+            vec3{ 1.0f, 0.35f, 0.25f },
+            vec3{ 0.25f, 0.85f, 0.45f },
+            vec3{ 0.25f, 0.55f, 1.0f },
+        };
+        fragColor = vec4(vertexColor * bar, 1.0f);
+        return false;
+    }
+
+    jrender::ModelPtr _model;
+};
+
 int main()
 {
     constexpr int screenWidth = 800;
@@ -174,6 +198,18 @@ int main()
     model->loadModel("diablo3_pose/diablo3_pose.obj");
     ShaderPtr shaderD = std::make_shared<MyShader>(model);
 
+    // frustum clipping debug geometry: each triangle crosses a different clip plane.
+    ModelPtr clipDebugModel = std::make_shared<Model>();
+    clipDebugModel->setVertices({
+      glm::vec3(-1.6f, -0.15f, -0.4f), glm::vec3(-0.2f, 0.75f, -1.2f), glm::vec3(-0.2f, -0.85f, -1.4f),  // left
+      glm::vec3(1.6f, 0.15f, -0.4f),   glm::vec3(0.2f, 0.85f, -1.4f),  glm::vec3(0.2f, -0.75f, -1.2f),   // right
+      glm::vec3(-0.25f, 1.7f, -0.5f),  glm::vec3(-0.85f, 0.25f, -1.3f), glm::vec3(0.85f, 0.25f, -1.1f),  // top
+      glm::vec3(0.25f, -1.7f, -0.5f),  glm::vec3(-0.85f, -0.25f, -1.1f), glm::vec3(0.85f, -0.25f, -1.3f), // bottom
+      glm::vec3(-0.2f, -0.2f, 0.15f),  glm::vec3(0.75f, 0.35f, -1.0f),  glm::vec3(-0.75f, 0.45f, -1.0f),  // near
+      glm::vec3(-0.3f, 0.2f, -120.0f), glm::vec3(0.9f, 0.4f, -3.5f),    glm::vec3(-0.8f, -0.5f, -4.0f),  // far
+    });
+    ShaderPtr clipDebugShader = std::make_shared<ClipDebugShader>(clipDebugModel);
+
     render.setShader(shaderD);
     render.setModel(model);
 
@@ -199,10 +235,17 @@ int main()
 
         mvp = proj * view * modelMat;
 
-    // 将图像绘制到窗口
-    render.drawIndex(PrimitiveType::Triangle, 0, model->faces() * 3);
-    std::copy(frame->data(), frame->data() + frame->size(), xImage->data);
-    XPutImage(display, window, gc, xImage, 0, 0, 0, 0, screenWidth, screenHeight);
+        render.setShader(clipDebugShader);
+        render.setModel(clipDebugModel);
+        render.drawArray(PrimitiveType::Triangle, 0, 18);
+
+        render.setShader(shaderD);
+        render.setModel(model);
+        render.drawIndex(PrimitiveType::Triangle, 0, model->faces() * 3);
+
+        // 将图像绘制到窗口
+        std::copy(frame->data(), frame->data() + frame->size(), xImage->data);
+        XPutImage(display, window, gc, xImage, 0, 0, 0, 0, screenWidth, screenHeight);
     }
 
     // 清理
